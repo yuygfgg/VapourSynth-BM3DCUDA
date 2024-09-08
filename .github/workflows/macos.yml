@@ -28,7 +28,7 @@ jobs:
     
     - name: Build
       run: |
-        cmake -S . -B build -D CMAKE_BUILD_TYPE=Release -D VAPOURSYNTH_INCLUDE_DIRECTORY=/vapoursynth/include
+        cmake -S . -B build -D CMAKE_BUILD_TYPE=Release -D VAPOURSYNTH_INCLUDE_DIRECTORY=vapoursynth/include
         cmake --build build --config Release
         cmake --install build --prefix artifact
         
