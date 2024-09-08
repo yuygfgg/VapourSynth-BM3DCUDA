@@ -68,10 +68,6 @@
 #if defined(__x86_64__) || defined(_M_X64) || defined(__i386) || defined(_M_IX86)
 #include <nmmintrin.h>
 
-uint32_t _mm_popcnt_u32(uint32_t x) {
-    return _mm_popcnt_u32(x);
-}
-
 #elif defined(__ARM_NEON)
 
 uint32_t _mm_popcnt_u32(uint32_t x) {
