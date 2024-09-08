@@ -62,9 +62,41 @@
 #include <VapourSynth.h>
 #include <VSHelper.h>
 
-#include <immintrin.h>
+#include "simde/x86/avx2.h"
+#include "simde/x86/fma.h"
 
 #include "cpuid.h"
+
+#if defined(__x86_64__) || defined(_M_X64) || defined(__i386) || defined(_M_IX86)
+#include <nmmintrin.h>
+
+uint32_t _mm_popcnt_u32(uint32_t x) {
+    return _mm_popcnt_u32(x);
+}
+
+#elif defined(__ARM_NEON)
+
+uint32_t _mm_popcnt_u32(uint32_t x) {
+    uint8x8_t input = vmov_n_u8(0);
+    input = vreinterpret_u8_u32(vset_lane_u32(x, vreinterpret_u32_u8(input), 0));
+    uint8x8_t result = vcnt_u8(input);
+    uint16x4_t sum = vpaddl_u8(result);
+    sum = vpadd_u16(sum, sum);
+    return vget_lane_u16(sum, 0);
+}
+
+#else
+
+uint32_t _mm_popcnt_u32(uint32_t x) {
+    uint32_t count = 0;
+    while (x) {
+        x &= (x - 1);
+        count++;
+    }
+    return count;
+}
+
+#endif
 
 static VSPlugin * myself = nullptr;
 
@@ -89,50 +121,50 @@ struct BM3DData {
 };
 
 // shuffle_up({0, 1, ..., 7}) => {0, 0, 1, ..., 6}
-static inline __m256i shuffle_up(__m256i x) noexcept {
-    __m256i pre_mask { _mm256_setr_epi32(0, 0, 1, 2, 3, 4, 5, 6) };
-    return _mm256_permutevar8x32_epi32(x, pre_mask);
+static inline simde__m256i shuffle_up(simde__m256i x) noexcept {
+    simde__m256i pre_mask { simde_mm256_setr_epi32(0, 0, 1, 2, 3, 4, 5, 6) };
+    return simde_mm256_permutevar8x32_epi32(x, pre_mask);
 }
 
 // Reduction operation of YMM lanes
-static inline __m256 reduce_add(__m256 x) noexcept {
-    x = _mm256_add_ps(x, _mm256_permute_ps(x, 0b10110001));
-    x = _mm256_add_ps(x, _mm256_permute_ps(x, 0b01001110));
-    x = _mm256_add_ps(x, _mm256_castpd_ps(_mm256_permute4x64_pd(_mm256_castps_pd(x), 0b01001110)));
+static inline simde__m256  reduce_add(simde__m256 x) noexcept {
+    x = simde_mm256_add_ps(x, simde_mm256_permute_ps(x, 0b10110001));
+    x = simde_mm256_add_ps(x, simde_mm256_permute_ps(x, 0b01001110));
+    x = simde_mm256_add_ps(x, simde_mm256_castpd_ps(simde_mm256_permute4x64_pd(simde_mm256_castps_pd(x), 0b01001110)));
     return x;
 }
 
 // Reduction operation of YMM lanes
-static inline __m256i reduce_add(__m256i x) noexcept {
-    x = _mm256_add_epi32(x, _mm256_castps_si256(_mm256_permute_ps(_mm256_castsi256_ps(x), 0b10110001)));
-    x = _mm256_add_epi32(x, _mm256_castps_si256(_mm256_permute_ps(_mm256_castsi256_ps(x), 0b01001110)));
-    x = _mm256_add_epi32(x, _mm256_permute4x64_epi64(x, 0b01001110));
+static inline simde__m256i reduce_add(simde__m256i x) noexcept {
+    x = simde_mm256_add_epi32(x, simde_mm256_castps_si256(simde_mm256_permute_ps(simde_mm256_castsi256_ps(x), 0b10110001)));
+    x = simde_mm256_add_epi32(x, simde_mm256_castps_si256(simde_mm256_permute_ps(simde_mm256_castsi256_ps(x), 0b01001110)));
+    x = simde_mm256_add_epi32(x, simde_mm256_permute4x64_epi64(x, 0b01001110));
     return x;
 }
 
 static inline void load_block(
-    __m256 dst[8], const float * srcp, int stride
+    simde__m256 dst[8], const float * srcp, int stride
 ) noexcept {
 
     for (int i = 0; i < 8; ++i) {
-        dst[i] = _mm256_loadu_ps(&srcp[i * stride]);
+        dst[i] = simde_mm256_loadu_ps(&srcp[i * stride]);
     }
 }
 
 // Returns the sum of square distance of input blocks
-static inline __m256 compute_distance(
-    const __m256 reference_block[8], const __m256 candidate_block[8]
+static inline simde__m256 compute_distance(
+    const simde__m256 reference_block[8], const simde__m256 candidate_block[8]
 ) noexcept {
 
     // manual unroll
-    __m256 errors[2] {};
+    simde__m256 errors[2] {};
 
     for (int i = 0; i < 8; ++i) {
-        __m256 row_diff = _mm256_sub_ps(reference_block[i], candidate_block[i]);
-        errors[i % 2] = _mm256_fmadd_ps(row_diff, row_diff, errors[i % 2]);
+        simde__m256 row_diff = simde_mm256_sub_ps(reference_block[i], candidate_block[i]);
+        errors[i % 2] = simde_mm256_fmadd_ps(row_diff, row_diff, errors[i % 2]);
     }
 
-    return reduce_add(_mm256_add_ps(errors[0], errors[1]));
+    return reduce_add(simde_mm256_add_ps(errors[0], errors[1]));
 }
 
 // Given a `reference_block`, finds 8 most similar blocks
@@ -144,7 +176,7 @@ static inline void block_matching(
     std::array<float, 8> & errors,
     std::array<int, 8> & index_x,
     std::array<int, 8> & index_y,
-    const __m256 reference_block[8],
+    const simde__m256 reference_block[8],
     const float * srcp, int stride,
     int width, int height,
     int bm_range, int x, int y
@@ -155,7 +187,7 @@ static inline void block_matching(
         0,
         0, 0, 0, 0, 0, 0, 0, -1,
         0, 0, 0, 0, 0, 0, 0, 0 };
-    __m256i shift_base = _mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7);
+    simde__m256i shift_base = simde_mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7);
 
     // clamps candidate locations to be within the plane
     int left = std::max(x - bm_range, 0);
@@ -163,43 +195,43 @@ static inline void block_matching(
     int top = std::max(y - bm_range, 0);
     int bottom = std::min(y + bm_range, height - 8);
 
-    __m256 errors8 { _mm256_loadu_ps(errors.data()) };
-    __m256i index8_x { _mm256_loadu_si256(reinterpret_cast<const __m256i *>(index_x.data())) };
-    __m256i index8_y { _mm256_loadu_si256(reinterpret_cast<const __m256i *>(index_y.data())) };
+    simde__m256 errors8 { simde_mm256_loadu_ps(errors.data()) };
+    simde__m256i index8_x { simde_mm256_loadu_si256(reinterpret_cast<const simde__m256i *>(index_x.data())) };
+    simde__m256i index8_y { simde_mm256_loadu_si256(reinterpret_cast<const simde__m256i *>(index_y.data())) };
 
     const float * srcp_row = &srcp[top * stride + left];
     for (int row = top; row <= bottom; ++row) {
         const float * srcp = srcp_row; // pointer to 2D neighborhoods
         for (int col = left; col <= right; ++col) {
-            __m256 candidate_block[8];
+            simde__m256 candidate_block[8];
             load_block(candidate_block, srcp, stride);
 
-            __m256 error = compute_distance(reference_block, candidate_block);
+            simde__m256 error = compute_distance(reference_block, candidate_block);
 
-            __m256 flag { _mm256_cmp_ps(error, errors8, _CMP_LT_OQ) };
+            simde__m256 flag { simde_mm256_cmp_ps(error, errors8, SIMDE_CMP_LT_OQ) };
 
-            if (int imask = _mm256_movemask_ps(flag); imask) {
-                __m256i shuffle_mask = _mm256_add_epi32(
-                    shift_base, _mm256_castps_si256(flag));
-                __m256 pre_error = _mm256_permutevar8x32_ps(
+            if (int imask = simde_mm256_movemask_ps(flag); imask) {
+                simde__m256i shuffle_mask = simde_mm256_add_epi32(
+                    shift_base, simde_mm256_castps_si256(flag));
+                simde__m256 pre_error = simde_mm256_permutevar8x32_ps(
                     errors8, shuffle_mask);
-                __m256i pre_index_x = _mm256_permutevar8x32_epi32(
+                simde__m256i pre_index_x = simde_mm256_permutevar8x32_epi32(
                     index8_x, shuffle_mask);
-                __m256i pre_index_y = _mm256_permutevar8x32_epi32(
+                simde__m256i pre_index_y = simde_mm256_permutevar8x32_epi32(
                     index8_y, shuffle_mask);
 
                 int count = _mm_popcnt_u32(static_cast<unsigned int>(imask));
-                __m256 blend_mask = _mm256_castsi256_ps(_mm256_loadu_si256(
-                    reinterpret_cast<const __m256i *>(&blend[count])));
-                errors8 = _mm256_blendv_ps(
+                simde__m256 blend_mask = simde_mm256_castsi256_ps(simde_mm256_loadu_si256(
+                    reinterpret_cast<const simde__m256i *>(&blend[count])));
+                errors8 = simde_mm256_blendv_ps(
                     pre_error, error, blend_mask);
-                index8_x = _mm256_castps_si256(_mm256_blendv_ps(
-                    _mm256_castsi256_ps(pre_index_x),
-                    _mm256_castsi256_ps(_mm256_set1_epi32(col)),
+                index8_x = simde_mm256_castps_si256(simde_mm256_blendv_ps(
+                    simde_mm256_castsi256_ps(pre_index_x),
+                    simde_mm256_castsi256_ps(simde_mm256_set1_epi32(col)),
                     blend_mask));
-                index8_y = _mm256_castps_si256(_mm256_blendv_ps(
-                    _mm256_castsi256_ps(pre_index_y),
-                    _mm256_castsi256_ps(_mm256_set1_epi32(row)),
+                index8_y = simde_mm256_castps_si256(simde_mm256_blendv_ps(
+                    simde_mm256_castsi256_ps(pre_index_y),
+                    simde_mm256_castsi256_ps(simde_mm256_set1_epi32(row)),
                     blend_mask));
             }
 
@@ -209,9 +241,9 @@ static inline void block_matching(
         srcp_row += stride;
     }
 
-    _mm256_storeu_ps(errors.data(), errors8);
-    _mm256_storeu_si256(reinterpret_cast<__m256i *>(index_x.data()), index8_x);
-    _mm256_storeu_si256(reinterpret_cast<__m256i *>(index_y.data()), index8_y);
+    simde_mm256_storeu_ps(errors.data(), errors8);
+    simde_mm256_storeu_si256(reinterpret_cast<simde__m256i *>(index_x.data()), index8_x);
+    simde_mm256_storeu_si256(reinterpret_cast<simde__m256i *>(index_y.data()), index8_y);
 }
 
 // Similar to function `block_matching`, but with candidate locations
@@ -222,7 +254,7 @@ static inline void block_matching_temporal(
     std::array<int, 8> & index_x,
     std::array<int, 8> & index_y,
     std::array<int, 8> & index_z,
-    const __m256 reference_block[8],
+    const simde__m256 reference_block[8],
     const float * VS_RESTRICT global_srcps[/* 2 * radius + 1 */],
     int stride, int width, int height, int bm_range,
     int x, int y, int radius, int ps_num, int ps_range
@@ -233,7 +265,7 @@ static inline void block_matching_temporal(
         0,
         0, 0, 0, 0, 0, 0, 0, -1,
         0, 0, 0, 0, 0, 0, 0, 0 };
-    __m256i shift_base = _mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7);
+    simde__m256i shift_base = simde_mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7);
 
     int center = radius;
 
@@ -246,10 +278,10 @@ static inline void block_matching_temporal(
 
     index_z.fill(center);
 
-    __m256 errors8 { _mm256_loadu_ps(errors.data()) };
-    __m256i index8_x { _mm256_loadu_si256(reinterpret_cast<const __m256i *>(index_x.data())) };
-    __m256i index8_y { _mm256_loadu_si256(reinterpret_cast<const __m256i *>(index_y.data())) };
-    __m256i index8_z { _mm256_loadu_si256(reinterpret_cast<const __m256i *>(index_z.data())) };
+    simde__m256 errors8 { simde_mm256_loadu_ps(errors.data()) };
+    simde__m256i index8_x { simde_mm256_loadu_si256(reinterpret_cast<const simde__m256i *>(index_x.data())) };
+    simde__m256i index8_y { simde_mm256_loadu_si256(reinterpret_cast<const simde__m256i *>(index_y.data())) };
+    simde__m256i index8_z { simde_mm256_loadu_si256(reinterpret_cast<const simde__m256i *>(index_z.data())) };
 
     std::array<int, 8> center_index8_x { index_x };
     std::array<int, 8> center_index8_y { index_y };
@@ -273,38 +305,38 @@ static inline void block_matching_temporal(
                     ps_range, last_index8_x[i], last_index8_y[i]);
             }
             for (int i = 0; i < ps_num; ++i) {
-                __m256 error = _mm256_set1_ps(frame_errors8[i]);
+                simde__m256 error = simde_mm256_set1_ps(frame_errors8[i]);
 
-                __m256 flag { _mm256_cmp_ps(error, errors8, _CMP_LT_OQ) };
+                simde__m256 flag { simde_mm256_cmp_ps(error, errors8, SIMDE_CMP_LT_OQ) };
 
-                if (int imask = _mm256_movemask_ps(flag); imask) {
-                    __m256i shuffle_mask = _mm256_add_epi32(
-                        shift_base, _mm256_castps_si256(flag));
-                    __m256 pre_error = _mm256_permutevar8x32_ps(
+                if (int imask = simde_mm256_movemask_ps(flag); imask) {
+                    simde__m256i shuffle_mask = simde_mm256_add_epi32(
+                        shift_base, simde_mm256_castps_si256(flag));
+                    simde__m256 pre_error = simde_mm256_permutevar8x32_ps(
                         errors8, shuffle_mask);
-                    __m256i pre_index_x = _mm256_permutevar8x32_epi32(
+                    simde__m256i pre_index_x = simde_mm256_permutevar8x32_epi32(
                         index8_x, shuffle_mask);
-                    __m256i pre_index_y = _mm256_permutevar8x32_epi32(
+                    simde__m256i pre_index_y = simde_mm256_permutevar8x32_epi32(
                         index8_y, shuffle_mask);
-                    __m256i pre_index_z = _mm256_permutevar8x32_epi32(
+                    simde__m256i pre_index_z = simde_mm256_permutevar8x32_epi32(
                         index8_z, shuffle_mask);
 
                     int count = _mm_popcnt_u32(static_cast<unsigned int>(imask));
-                    __m256 blend_mask = _mm256_castsi256_ps(_mm256_loadu_si256(
-                        reinterpret_cast<const __m256i *>(&blend[count])));
-                    errors8 = _mm256_blendv_ps(
+                    simde__m256 blend_mask = simde_mm256_castsi256_ps(simde_mm256_loadu_si256(
+                        reinterpret_cast<const simde__m256i *>(&blend[count])));
+                    errors8 = simde_mm256_blendv_ps(
                         pre_error, error, blend_mask);
-                    index8_x = _mm256_castps_si256(_mm256_blendv_ps(
-                        _mm256_castsi256_ps(pre_index_x),
-                        _mm256_castsi256_ps(_mm256_set1_epi32(frame_index8_x[i])),
+                    index8_x = simde_mm256_castps_si256(simde_mm256_blendv_ps(
+                        simde_mm256_castsi256_ps(pre_index_x),
+                        simde_mm256_castsi256_ps(simde_mm256_set1_epi32(frame_index8_x[i])),
                         blend_mask));
-                    index8_y = _mm256_castps_si256(_mm256_blendv_ps(
-                        _mm256_castsi256_ps(pre_index_y),
-                        _mm256_castsi256_ps(_mm256_set1_epi32(frame_index8_y[i])),
+                    index8_y = simde_mm256_castps_si256(simde_mm256_blendv_ps(
+                        simde_mm256_castsi256_ps(pre_index_y),
+                        simde_mm256_castsi256_ps(simde_mm256_set1_epi32(frame_index8_y[i])),
                         blend_mask));
-                    index8_z = _mm256_castps_si256(_mm256_blendv_ps(
-                        _mm256_castsi256_ps(pre_index_z),
-                        _mm256_castsi256_ps(_mm256_set1_epi32(z)),
+                    index8_z = simde_mm256_castps_si256(simde_mm256_blendv_ps(
+                        simde_mm256_castsi256_ps(pre_index_z),
+                        simde_mm256_castsi256_ps(simde_mm256_set1_epi32(z)),
                         blend_mask));
                 }
             }
@@ -314,10 +346,10 @@ static inline void block_matching_temporal(
         }
     }
 
-    _mm256_storeu_ps(errors.data(), errors8);
-    _mm256_storeu_si256(reinterpret_cast<__m256i *>(index_x.data()), index8_x);
-    _mm256_storeu_si256(reinterpret_cast<__m256i *>(index_y.data()), index8_y);
-    _mm256_storeu_si256(reinterpret_cast<__m256i *>(index_z.data()), index8_z);
+    simde_mm256_storeu_ps(errors.data(), errors8);
+    simde_mm256_storeu_si256(reinterpret_cast<simde__m256i *>(index_x.data()), index8_x);
+    simde_mm256_storeu_si256(reinterpret_cast<simde__m256i *>(index_y.data()), index8_y);
+    simde_mm256_storeu_si256(reinterpret_cast<simde__m256i *>(index_z.data()), index8_z);
 }
 
 // Set the first element in the arrays of coordinates to be (`x`, `y`)
@@ -328,28 +360,28 @@ static inline void insert_if_not_in(
     int x, int y
 ) noexcept {
 
-    const __m256i first_mask { _mm256_setr_epi32(0xFFFFFFFF, 0, 0, 0, 0, 0, 0, 0) };
+    const simde__m256i first_mask { simde_mm256_setr_epi32(0xFFFFFFFF, 0, 0, 0, 0, 0, 0, 0) };
 
-    __m256i index8_x { _mm256_loadu_si256(reinterpret_cast<const __m256i *>(index8_x_data.data())) };
-    __m256i index8_y { _mm256_loadu_si256(reinterpret_cast<const __m256i *>(index8_y_data.data())) };
+    simde__m256i index8_x { simde_mm256_loadu_si256(reinterpret_cast<const simde__m256i *>(index8_x_data.data())) };
+    simde__m256i index8_y { simde_mm256_loadu_si256(reinterpret_cast<const simde__m256i *>(index8_y_data.data())) };
 
-    __m256i current_index_x { _mm256_set1_epi32(x) };
-    __m256i current_index_y { _mm256_set1_epi32(y) };
-    __m256i flag {
-        _mm256_and_si256(
-            _mm256_cmpeq_epi32(index8_x, current_index_x),
-            _mm256_cmpeq_epi32(index8_y, current_index_y))
+    simde__m256i current_index_x { simde_mm256_set1_epi32(x) };
+    simde__m256i current_index_y { simde_mm256_set1_epi32(y) };
+    simde__m256i flag {
+        simde_mm256_and_si256(
+            simde_mm256_cmpeq_epi32(index8_x, current_index_x),
+            simde_mm256_cmpeq_epi32(index8_y, current_index_y))
     };
 
-    if (!_mm256_movemask_ps(_mm256_castsi256_ps(flag))) {
-        __m256i pre_index_x { shuffle_up(index8_x) };
-        __m256i pre_index_y { shuffle_up(index8_y) };
-        index8_x = _mm256_blendv_epi8(pre_index_x, current_index_x, first_mask);
-        index8_y = _mm256_blendv_epi8(pre_index_y, current_index_y, first_mask);
+    if (!simde_mm256_movemask_ps(simde_mm256_castsi256_ps(flag))) {
+        simde__m256i pre_index_x { shuffle_up(index8_x) };
+        simde__m256i pre_index_y { shuffle_up(index8_y) };
+        index8_x = simde_mm256_blendv_epi8(pre_index_x, current_index_x, first_mask);
+        index8_y = simde_mm256_blendv_epi8(pre_index_y, current_index_y, first_mask);
     }
 
-    _mm256_storeu_si256(reinterpret_cast<__m256i *>(index8_x_data.data()), index8_x);
-    _mm256_storeu_si256(reinterpret_cast<__m256i *>(index8_y_data.data()), index8_y);
+    simde_mm256_storeu_si256(reinterpret_cast<simde__m256i *>(index8_x_data.data()), index8_x);
+    simde_mm256_storeu_si256(reinterpret_cast<simde__m256i *>(index8_y_data.data()), index8_y);
 }
 
 // Temporal version of function `insert_if_not_in`
@@ -360,38 +392,38 @@ static inline void insert_if_not_in_temporal(
     int x, int y, int z
 ) noexcept {
 
-    const __m256i first_mask { _mm256_setr_epi32(0xFFFFFFFF, 0, 0, 0, 0, 0, 0, 0) };
+    const simde__m256i first_mask { simde_mm256_setr_epi32(0xFFFFFFFF, 0, 0, 0, 0, 0, 0, 0) };
 
-    __m256i index8_x { _mm256_loadu_si256(reinterpret_cast<const __m256i *>(index8_x_data.data())) };
-    __m256i index8_y { _mm256_loadu_si256(reinterpret_cast<const __m256i *>(index8_y_data.data())) };
-    __m256i index8_z { _mm256_loadu_si256(reinterpret_cast<const __m256i *>(index8_z_data.data())) };
+    simde__m256i index8_x { simde_mm256_loadu_si256(reinterpret_cast<const simde__m256i *>(index8_x_data.data())) };
+    simde__m256i index8_y { simde_mm256_loadu_si256(reinterpret_cast<const simde__m256i *>(index8_y_data.data())) };
+    simde__m256i index8_z { simde_mm256_loadu_si256(reinterpret_cast<const simde__m256i *>(index8_z_data.data())) };
 
-    __m256i current_index_x { _mm256_set1_epi32(x) };
-    __m256i current_index_y { _mm256_set1_epi32(y) };
-    __m256i current_index_z { _mm256_set1_epi32(z) };
-    __m256i flag {
-        _mm256_and_si256(_mm256_and_si256(
-            _mm256_cmpeq_epi32(index8_x, current_index_x),
-            _mm256_cmpeq_epi32(index8_y, current_index_y)),
-            _mm256_cmpeq_epi32(index8_z, current_index_z))
+    simde__m256i current_index_x { simde_mm256_set1_epi32(x) };
+    simde__m256i current_index_y { simde_mm256_set1_epi32(y) };
+    simde__m256i current_index_z { simde_mm256_set1_epi32(z) };
+    simde__m256i flag {
+        simde_mm256_and_si256(simde_mm256_and_si256(
+            simde_mm256_cmpeq_epi32(index8_x, current_index_x),
+            simde_mm256_cmpeq_epi32(index8_y, current_index_y)),
+            simde_mm256_cmpeq_epi32(index8_z, current_index_z))
     };
 
-    if (!_mm256_movemask_ps(_mm256_castsi256_ps(flag))) {
-        __m256i pre_index_x { shuffle_up(index8_x) };
-        __m256i pre_index_y { shuffle_up(index8_y) };
-        __m256i pre_index_z { shuffle_up(index8_z) };
-        index8_x = _mm256_blendv_epi8(pre_index_x, current_index_x, first_mask);
-        index8_y = _mm256_blendv_epi8(pre_index_y, current_index_y, first_mask);
-        index8_z = _mm256_blendv_epi8(pre_index_z, current_index_z, first_mask);
+    if (!simde_mm256_movemask_ps(simde_mm256_castsi256_ps(flag))) {
+        simde__m256i pre_index_x { shuffle_up(index8_x) };
+        simde__m256i pre_index_y { shuffle_up(index8_y) };
+        simde__m256i pre_index_z { shuffle_up(index8_z) };
+        index8_x = simde_mm256_blendv_epi8(pre_index_x, current_index_x, first_mask);
+        index8_y = simde_mm256_blendv_epi8(pre_index_y, current_index_y, first_mask);
+        index8_z = simde_mm256_blendv_epi8(pre_index_z, current_index_z, first_mask);
     }
 
-    _mm256_storeu_si256(reinterpret_cast<__m256i *>(index8_x_data.data()), index8_x);
-    _mm256_storeu_si256(reinterpret_cast<__m256i *>(index8_y_data.data()), index8_y);
-    _mm256_storeu_si256(reinterpret_cast<__m256i *>(index8_z_data.data()), index8_z);
+    simde_mm256_storeu_si256(reinterpret_cast<simde__m256i *>(index8_x_data.data()), index8_x);
+    simde_mm256_storeu_si256(reinterpret_cast<simde__m256i *>(index8_y_data.data()), index8_y);
+    simde_mm256_storeu_si256(reinterpret_cast<simde__m256i *>(index8_z_data.data()), index8_z);
 }
 
 static inline void load_3d_group(
-    __m256 dst[64], const float * VS_RESTRICT srcp, int stride,
+    simde__m256 dst[64], const float * VS_RESTRICT srcp, int stride,
     const std::array<int, 8> &index_x, const std::array<int, 8> &index_y
 ) noexcept {
 
@@ -404,7 +436,7 @@ static inline void load_3d_group(
 }
 
 // Temporal version of function `load_3d_group`
-static inline void load_3d_group_temporal(__m256 dst[64],
+static inline void load_3d_group_temporal(simde__m256 dst[64],
     const float * VS_RESTRICT srcps[/* 2 * radius + 1 */], int stride,
     const std::array<int, 8> &index_x,
     const std::array<int, 8> &index_y,
@@ -422,9 +454,9 @@ static inline void load_3d_group_temporal(__m256 dst[64],
 
 // FFTW-style 1D transform
 template <auto transform_impl, int stride=1, int howmany=8, int howmany_stride=8>
-static inline void transform_pack8(__m256 data[64]) noexcept {
+static inline void transform_pack8(simde__m256 data[64]) noexcept {
     for (int iter = 0; iter < howmany; ++iter, data += howmany_stride) {
-        __m256 v[8];
+        simde__m256 v[8];
 
         for (int i = 0; i < 8; ++i) {
             v[i] = data[i * stride];
@@ -442,158 +474,158 @@ static inline void transform_pack8(__m256 data[64]) noexcept {
 // Modified from fftw-3.3.9 generated code:
 // fftw-3.3.9/rdft/scalar/r2r/e10_8.c and e01_8.c
 template <bool forward>
-static inline void dct(__m256 block[8]) noexcept {
+static inline void dct(simde__m256 block[8]) noexcept {
     if constexpr (forward) {
-        __m256 KP414213562 { _mm256_set1_ps(+0.414213562373095048801688724209698078569671875) };
-        __m256 KP1_847759065 { _mm256_set1_ps(+1.847759065022573512256366378793576573644833252) };
-        __m256 KP198912367 { _mm256_set1_ps(+0.198912367379658006911597622644676228597850501) };
-        __m256 KP1_961570560 { _mm256_set1_ps(1.961570560806460898252364472268478073947867462) };
-        __m256 KP1_414213562 { _mm256_set1_ps(+1.414213562373095048801688724209698078569671875) };
-        __m256 KP668178637 { _mm256_set1_ps(+0.668178637919298919997757686523080761552472251) };
-        __m256 KP1_662939224 { _mm256_set1_ps(+1.662939224605090474157576755235811513477121624) };
-        __m256 KP707106781 { _mm256_set1_ps(+0.707106781186547524400844362104849039284835938) };
-        __m256 neg_mask { _mm256_set1_ps(-0.0f) };
+        simde__m256 KP414213562 { simde_mm256_set1_ps(+0.414213562373095048801688724209698078569671875) };
+        simde__m256 KP1_847759065 { simde_mm256_set1_ps(+1.847759065022573512256366378793576573644833252) };
+        simde__m256 KP198912367 { simde_mm256_set1_ps(+0.198912367379658006911597622644676228597850501) };
+        simde__m256 KP1_961570560 { simde_mm256_set1_ps(1.961570560806460898252364472268478073947867462) };
+        simde__m256 KP1_414213562 { simde_mm256_set1_ps(+1.414213562373095048801688724209698078569671875) };
+        simde__m256 KP668178637 { simde_mm256_set1_ps(+0.668178637919298919997757686523080761552472251) };
+        simde__m256 KP1_662939224 { simde_mm256_set1_ps(+1.662939224605090474157576755235811513477121624) };
+        simde__m256 KP707106781 { simde_mm256_set1_ps(+0.707106781186547524400844362104849039284835938) };
+        simde__m256 neg_mask { simde_mm256_set1_ps(-0.0f) };
 
         auto T1 = block[0];
         auto T2 = block[7];
-        auto T3 = _mm256_sub_ps(T1, T2);
-        auto Tj = _mm256_add_ps(T1, T2);
+        auto T3 = simde_mm256_sub_ps(T1, T2);
+        auto Tj = simde_mm256_add_ps(T1, T2);
         auto Tc = block[4];
         auto Td = block[3];
-        auto Te = _mm256_sub_ps(Tc, Td);
-        auto Tk = _mm256_add_ps(Tc, Td);
+        auto Te = simde_mm256_sub_ps(Tc, Td);
+        auto Tk = simde_mm256_add_ps(Tc, Td);
         auto T4 = block[2];
         auto T5 = block[5];
-        auto T6 = _mm256_sub_ps(T4, T5);
+        auto T6 = simde_mm256_sub_ps(T4, T5);
         auto T7 = block[1];
         auto T8 = block[6];
-        auto T9 = _mm256_sub_ps(T7, T8);
-        auto Ta = _mm256_add_ps(T6, T9);
-        auto Tn = _mm256_add_ps(T7, T8);
-        auto Tf = _mm256_sub_ps(T6, T9);
-        auto Tm = _mm256_add_ps(T4, T5);
-        auto Tb = _mm256_fnmadd_ps(KP707106781, Ta, T3);
-        auto Tg = _mm256_fnmadd_ps(KP707106781, Tf, Te);
-        block[3] = _mm256_mul_ps(KP1_662939224, _mm256_fmadd_ps(KP668178637, Tg, Tb));
-        block[5] = _mm256_xor_ps(neg_mask, _mm256_mul_ps(KP1_662939224, _mm256_fnmadd_ps(KP668178637, Tb, Tg)));
-        auto Tp = _mm256_add_ps(Tj, Tk);
-        auto Tq = _mm256_add_ps(Tm, Tn);
-        block[4] = _mm256_mul_ps(KP1_414213562, _mm256_sub_ps(Tp, Tq));
-        block[0] = _mm256_mul_ps(KP1_414213562, _mm256_add_ps(Tp, Tq));
-        auto Th = _mm256_fmadd_ps(KP707106781, Ta, T3);
-        auto Ti = _mm256_fmadd_ps(KP707106781, Tf, Te);
-        block[1] = _mm256_mul_ps(KP1_961570560, _mm256_fnmadd_ps(KP198912367, Ti, Th));
-        block[7] = _mm256_mul_ps(KP1_961570560, _mm256_fmadd_ps(KP198912367, Th, Ti));
-        auto Tl = _mm256_sub_ps(Tj, Tk);
-        auto To = _mm256_sub_ps(Tm, Tn);
-        block[2] = _mm256_mul_ps(KP1_847759065, _mm256_fnmadd_ps(KP414213562, To, Tl));
-        block[6] = _mm256_mul_ps(KP1_847759065, _mm256_fmadd_ps(KP414213562, Tl, To));
+        auto T9 = simde_mm256_sub_ps(T7, T8);
+        auto Ta = simde_mm256_add_ps(T6, T9);
+        auto Tn = simde_mm256_add_ps(T7, T8);
+        auto Tf = simde_mm256_sub_ps(T6, T9);
+        auto Tm = simde_mm256_add_ps(T4, T5);
+        auto Tb = simde_mm256_fnmadd_ps(KP707106781, Ta, T3);
+        auto Tg = simde_mm256_fnmadd_ps(KP707106781, Tf, Te);
+        block[3] = simde_mm256_mul_ps(KP1_662939224, simde_mm256_fmadd_ps(KP668178637, Tg, Tb));
+        block[5] = simde_mm256_xor_ps(neg_mask, simde_mm256_mul_ps(KP1_662939224, simde_mm256_fnmadd_ps(KP668178637, Tb, Tg)));
+        auto Tp = simde_mm256_add_ps(Tj, Tk);
+        auto Tq = simde_mm256_add_ps(Tm, Tn);
+        block[4] = simde_mm256_mul_ps(KP1_414213562, simde_mm256_sub_ps(Tp, Tq));
+        block[0] = simde_mm256_mul_ps(KP1_414213562, simde_mm256_add_ps(Tp, Tq));
+        auto Th = simde_mm256_fmadd_ps(KP707106781, Ta, T3);
+        auto Ti = simde_mm256_fmadd_ps(KP707106781, Tf, Te);
+        block[1] = simde_mm256_mul_ps(KP1_961570560, simde_mm256_fnmadd_ps(KP198912367, Ti, Th));
+        block[7] = simde_mm256_mul_ps(KP1_961570560, simde_mm256_fmadd_ps(KP198912367, Th, Ti));
+        auto Tl = simde_mm256_sub_ps(Tj, Tk);
+        auto To = simde_mm256_sub_ps(Tm, Tn);
+        block[2] = simde_mm256_mul_ps(KP1_847759065, simde_mm256_fnmadd_ps(KP414213562, To, Tl));
+        block[6] = simde_mm256_mul_ps(KP1_847759065, simde_mm256_fmadd_ps(KP414213562, Tl, To));
     } else {
-        __m256 KP1_662939224 { _mm256_set1_ps(+1.662939224605090474157576755235811513477121624) };
-        __m256 KP668178637 { _mm256_set1_ps(+0.668178637919298919997757686523080761552472251) };
-        __m256 KP1_961570560 { _mm256_set1_ps(+1.961570560806460898252364472268478073947867462) };
-        __m256 KP198912367 { _mm256_set1_ps(+0.198912367379658006911597622644676228597850501) };
-        __m256 KP1_847759065 { _mm256_set1_ps(+1.847759065022573512256366378793576573644833252) };
-        __m256 KP707106781 { _mm256_set1_ps(+0.707106781186547524400844362104849039284835938) };
-        __m256 KP414213562 { _mm256_set1_ps(+0.414213562373095048801688724209698078569671875) };
-        __m256 KP1_414213562 { _mm256_set1_ps(+1.414213562373095048801688724209698078569671875) };
+        simde__m256 KP1_662939224 { simde_mm256_set1_ps(+1.662939224605090474157576755235811513477121624) };
+        simde__m256 KP668178637 { simde_mm256_set1_ps(+0.668178637919298919997757686523080761552472251) };
+        simde__m256 KP1_961570560 { simde_mm256_set1_ps(+1.961570560806460898252364472268478073947867462) };
+        simde__m256 KP198912367 { simde_mm256_set1_ps(+0.198912367379658006911597622644676228597850501) };
+        simde__m256 KP1_847759065 { simde_mm256_set1_ps(+1.847759065022573512256366378793576573644833252) };
+        simde__m256 KP707106781 { simde_mm256_set1_ps(+0.707106781186547524400844362104849039284835938) };
+        simde__m256 KP414213562 { simde_mm256_set1_ps(+0.414213562373095048801688724209698078569671875) };
+        simde__m256 KP1_414213562 { simde_mm256_set1_ps(+1.414213562373095048801688724209698078569671875) };
 
-        auto T1 = _mm256_mul_ps(KP1_414213562, block[0]);
+        auto T1 = simde_mm256_mul_ps(KP1_414213562, block[0]);
         auto T2 = block[4];
-        auto T3 = _mm256_fmadd_ps(KP1_414213562, T2, T1);
-        auto Tj = _mm256_fnmadd_ps(KP1_414213562, T2, T1);
+        auto T3 = simde_mm256_fmadd_ps(KP1_414213562, T2, T1);
+        auto Tj = simde_mm256_fnmadd_ps(KP1_414213562, T2, T1);
         auto T4 = block[2];
         auto T5 = block[6];
-        auto T6 = _mm256_fmadd_ps(KP414213562, T5, T4);
-        auto Tk = _mm256_fmsub_ps(KP414213562, T4, T5);
+        auto T6 = simde_mm256_fmadd_ps(KP414213562, T5, T4);
+        auto Tk = simde_mm256_fmsub_ps(KP414213562, T4, T5);
         auto T8 = block[1];
         auto Td = block[7];
         auto T9 = block[5];
         auto Ta = block[3];
-        auto Tb = _mm256_add_ps(T9, Ta);
-        auto Te = _mm256_sub_ps(Ta, T9);
-        auto Tc = _mm256_fmadd_ps(KP707106781, Tb, T8);
-        auto Tn = _mm256_fnmadd_ps(KP707106781, Te, Td);
-        auto Tf = _mm256_fmadd_ps(KP707106781, Te, Td);
-        auto Tm = _mm256_fnmadd_ps(KP707106781, Tb, T8);
-        auto T7 = _mm256_fmadd_ps(KP1_847759065, T6, T3);
-        auto Tg = _mm256_fmadd_ps(KP198912367, Tf, Tc);
-        block[7] = _mm256_fnmadd_ps(KP1_961570560, Tg, T7);
-        block[0] = _mm256_fmadd_ps(KP1_961570560, Tg, T7);
-        auto Tp = _mm256_fnmadd_ps(KP1_847759065, Tk, Tj);
-        auto Tq = _mm256_fmadd_ps(KP668178637, Tm, Tn);
-        block[5] = _mm256_fnmadd_ps(KP1_662939224, Tq, Tp);
-        block[2] = _mm256_fmadd_ps(KP1_662939224, Tq, Tp);
-        auto Th = _mm256_fnmadd_ps(KP1_847759065, T6, T3);
-        auto Ti = _mm256_fnmadd_ps(KP198912367, Tc, Tf);
-        block[3] = _mm256_fnmadd_ps(KP1_961570560, Ti, Th);
-        block[4] = _mm256_fmadd_ps(KP1_961570560, Ti, Th);
-        auto Tl = _mm256_fmadd_ps(KP1_847759065, Tk, Tj);
-        auto To = _mm256_fnmadd_ps(KP668178637, Tn, Tm);
-        block[6] = _mm256_fnmadd_ps(KP1_662939224, To, Tl);
-        block[1] = _mm256_fmadd_ps(KP1_662939224, To, Tl);
+        auto Tb = simde_mm256_add_ps(T9, Ta);
+        auto Te = simde_mm256_sub_ps(Ta, T9);
+        auto Tc = simde_mm256_fmadd_ps(KP707106781, Tb, T8);
+        auto Tn = simde_mm256_fnmadd_ps(KP707106781, Te, Td);
+        auto Tf = simde_mm256_fmadd_ps(KP707106781, Te, Td);
+        auto Tm = simde_mm256_fnmadd_ps(KP707106781, Tb, T8);
+        auto T7 = simde_mm256_fmadd_ps(KP1_847759065, T6, T3);
+        auto Tg = simde_mm256_fmadd_ps(KP198912367, Tf, Tc);
+        block[7] = simde_mm256_fnmadd_ps(KP1_961570560, Tg, T7);
+        block[0] = simde_mm256_fmadd_ps(KP1_961570560, Tg, T7);
+        auto Tp = simde_mm256_fnmadd_ps(KP1_847759065, Tk, Tj);
+        auto Tq = simde_mm256_fmadd_ps(KP668178637, Tm, Tn);
+        block[5] = simde_mm256_fnmadd_ps(KP1_662939224, Tq, Tp);
+        block[2] = simde_mm256_fmadd_ps(KP1_662939224, Tq, Tp);
+        auto Th = simde_mm256_fnmadd_ps(KP1_847759065, T6, T3);
+        auto Ti = simde_mm256_fnmadd_ps(KP198912367, Tc, Tf);
+        block[3] = simde_mm256_fnmadd_ps(KP1_961570560, Ti, Th);
+        block[4] = simde_mm256_fmadd_ps(KP1_961570560, Ti, Th);
+        auto Tl = simde_mm256_fmadd_ps(KP1_847759065, Tk, Tj);
+        auto To = simde_mm256_fnmadd_ps(KP668178637, Tn, Tm);
+        block[6] = simde_mm256_fnmadd_ps(KP1_662939224, To, Tl);
+        block[1] = simde_mm256_fmadd_ps(KP1_662939224, To, Tl);
     }
 }
 
 // Transposition of a 8x8 block.
-static inline void transpose(__m256 block[8]) noexcept {
+static inline void transpose(simde__m256 block[8]) noexcept {
     for (int i = 0; i < 4; ++i) {
-        __m256 temp1 = _mm256_shuffle_ps(block[i * 2], block[i * 2 + 1], 0b10001000);
-        __m256 temp2 = _mm256_shuffle_ps(block[i * 2], block[i * 2 + 1], 0b11011101);
+        simde__m256 temp1 = simde_mm256_shuffle_ps(block[i * 2], block[i * 2 + 1], 0b10001000);
+        simde__m256 temp2 = simde_mm256_shuffle_ps(block[i * 2], block[i * 2 + 1], 0b11011101);
         block[i * 2] = temp1;
         block[i * 2 + 1] = temp2;
     }
 
     for (int i = 0; i < 4; ++i) {
-        __m256 temp1 = _mm256_shuffle_ps(block[i + (i & -2)], block[i + (i & -2) + 2], 0b10001000);
-        __m256 temp2 = _mm256_shuffle_ps(block[i + (i & -2)], block[i + (i & -2) + 2], 0b11011101);
+        simde__m256 temp1 = simde_mm256_shuffle_ps(block[i + (i & -2)], block[i + (i & -2) + 2], 0b10001000);
+        simde__m256 temp2 = simde_mm256_shuffle_ps(block[i + (i & -2)], block[i + (i & -2) + 2], 0b11011101);
         block[i + (i & -2)] = temp1;
         block[i + (i & -2) + 2] = temp2;
     }
 
     for (int i = 0; i < 4; ++i) {
-        __m256 temp1 = _mm256_permute2f128_ps(block[i], block[i + 4], 0b00100000);
-        __m256 temp2 = _mm256_permute2f128_ps(block[i], block[i + 4], 0b00110001);
+        simde__m256 temp1 = simde_mm256_permute2f128_ps(block[i], block[i + 4], 0b00100000);
+        simde__m256 temp2 = simde_mm256_permute2f128_ps(block[i], block[i + 4], 0b00110001);
         block[i] = temp1;
         block[i + 4] = temp2;
     }
 }
 
-static inline __m256 hard_thresholding(__m256 data[64], float _sigma) noexcept {
+static inline simde__m256 hard_thresholding(simde__m256 data[64], float _sigma) noexcept {
     // number of retained (non-zero) coefficients
-    __m256i nnz {};
+    simde__m256i nnz {};
 
-    __m256 sigma = _mm256_set1_ps(_sigma);
+    simde__m256 sigma = simde_mm256_set1_ps(_sigma);
 
-    __m256 thr_mask = _mm256_setr_ps(0.f, 1.f, 1.f, 1.f, 1.f, 1.f, 1.f, 1.f);
+    simde__m256 thr_mask = simde_mm256_setr_ps(0.f, 1.f, 1.f, 1.f, 1.f, 1.f, 1.f, 1.f);
 
-    __m256 abs_mask = _mm256_castsi256_ps(_mm256_set1_epi32(0x7FFFFFFFu));
-    __m256 scaler = _mm256_set1_ps(1.f / 4096.f);
+    simde__m256 abs_mask = simde_mm256_castsi256_ps(simde_mm256_set1_epi32(0x7FFFFFFFu));
+    simde__m256 scaler = simde_mm256_set1_ps(1.f / 4096.f);
 
     for (int i = 0; i < 64; ++i) {
         auto val = data[i];
 
-        __m256 thr;
+        simde__m256 thr;
         if (i == 0) {
             // protects DC component
-            thr = _mm256_mul_ps(sigma, thr_mask);
+            thr = simde_mm256_mul_ps(sigma, thr_mask);
         } else {
             thr = sigma;
         }
 
-        __m256 _flag = _mm256_cmp_ps(_mm256_and_ps(val, abs_mask), thr, _CMP_GE_OQ);
-        __m256i flag = _mm256_castps_si256(_flag);
+        simde__m256 _flag = simde_mm256_cmp_ps(simde_mm256_and_ps(val, abs_mask), thr, SIMDE_CMP_GE_OQ);
+        simde__m256i flag = simde_mm256_castps_si256(_flag);
 
-        nnz = _mm256_sub_epi32(nnz, flag);
-        data[i] = _mm256_and_ps(_mm256_mul_ps(val, scaler), _flag);
+        nnz = simde_mm256_sub_epi32(nnz, flag);
+        data[i] = simde_mm256_and_ps(simde_mm256_mul_ps(val, scaler), _flag);
     }
 
     nnz = reduce_add(nnz);
 
-    return _mm256_rcp_ps(_mm256_cvtepi32_ps(nnz));
+    return simde_mm256_rcp_ps(simde_mm256_cvtepi32_ps(nnz));
 }
 
-static inline __m256 collaborative_hard(__m256 data[64], float _sigma) noexcept {
+static inline simde__m256 collaborative_hard(simde__m256 data[64], float _sigma) noexcept {
     constexpr int stride1 = 1;
     constexpr int stride2 = stride1 * 8;
 
@@ -603,7 +635,7 @@ static inline __m256 collaborative_hard(__m256 data[64], float _sigma) noexcept 
     }
     transform_pack8<dct<true>, stride2, 8, stride1>(data);
 
-    __m256 adaptive_weight = hard_thresholding(data, _sigma);
+    simde__m256 adaptive_weight = hard_thresholding(data, _sigma);
 
     for (int ndim = 0; ndim < 2; ++ndim) {
         transform_pack8<dct<false>, stride1, 8, stride2>(data);
@@ -614,35 +646,35 @@ static inline __m256 collaborative_hard(__m256 data[64], float _sigma) noexcept 
     return adaptive_weight;
 }
 
-static inline __m256 wiener_filtering(__m256 data[64], __m256 ref[64], float _sigma) noexcept {
-    __m256 norm {};
-    __m256 sigma = _mm256_set1_ps(_sigma);
-    __m256 sqr_sigma = _mm256_mul_ps(sigma, sigma);
+static inline simde__m256 wiener_filtering(simde__m256 data[64], simde__m256 ref[64], float _sigma) noexcept {
+    simde__m256 norm {};
+    simde__m256 sigma = simde_mm256_set1_ps(_sigma);
+    simde__m256 sqr_sigma = simde_mm256_mul_ps(sigma, sigma);
 
-    __m256 scaler = _mm256_set1_ps(1.f / 4096.f);
+    simde__m256 scaler = simde_mm256_set1_ps(1.f / 4096.f);
 
     for (int i = 0; i < 64; ++i) {
         auto val = data[i];
         auto ref_val = ref[i];
-        auto sqr_ref = _mm256_mul_ps(ref_val, ref_val);
-        auto coeff = _mm256_mul_ps(sqr_ref, _mm256_rcp_ps(_mm256_add_ps(sqr_ref, sqr_sigma)));
+        auto sqr_ref = simde_mm256_mul_ps(ref_val, ref_val);
+        auto coeff = simde_mm256_mul_ps(sqr_ref, simde_mm256_rcp_ps(simde_mm256_add_ps(sqr_ref, sqr_sigma)));
 
         if (i == 0) {
             // protects DC component
-            __m256 ones = _mm256_set1_ps(1.f);
-            coeff = _mm256_blend_ps(coeff, ones, 0b00000001);
+            simde__m256 ones = simde_mm256_set1_ps(1.f);
+            coeff = simde_mm256_blend_ps(coeff, ones, 0b00000001);
         }
 
-        norm = _mm256_fmadd_ps(coeff, coeff, norm);
-        data[i] = _mm256_mul_ps(_mm256_mul_ps(val, scaler), coeff);
+        norm = simde_mm256_fmadd_ps(coeff, coeff, norm);
+        data[i] = simde_mm256_mul_ps(simde_mm256_mul_ps(val, scaler), coeff);
     }
 
     norm = reduce_add(norm);
 
-    return _mm256_rcp_ps(norm);
+    return simde_mm256_rcp_ps(norm);
 }
 
-static inline __m256 collaborative_wiener(__m256 data[64], __m256 ref[64], float _sigma) {
+static inline simde__m256 collaborative_wiener(simde__m256 data[64], simde__m256 ref[64], float _sigma) {
     constexpr int stride1 = 1;
     constexpr int stride2 = stride1 * 8;
 
@@ -658,7 +690,7 @@ static inline __m256 collaborative_wiener(__m256 data[64], __m256 ref[64], float
     }
     transform_pack8<dct<true>, stride2, 8, stride1>(ref);
 
-    __m256 adaptive_weight = wiener_filtering(data, ref, _sigma);
+    simde__m256 adaptive_weight = wiener_filtering(data, ref, _sigma);
 
     for (int ndim = 0; ndim < 2; ++ndim) {
         transform_pack8<dct<false>, stride1, 8, stride2>(data);
@@ -675,10 +707,10 @@ static inline void local_accumulation(
     float * VS_RESTRICT wdstp,
     float * VS_RESTRICT weightp,
     int stride,
-    const __m256 denoising_group[64],
+    const simde__m256 denoising_group[64],
     const std::array<int, 8> &index_x,
     const std::array<int, 8> &index_y,
-    __m256 adaptive_weight
+    simde__m256 adaptive_weight
 ) noexcept {
 
     for (int i = 0; i < 8; ++i) {
@@ -689,13 +721,13 @@ static inline void local_accumulation(
         float * block_weightp = &weightp[y * stride + x];
 
         for (int j = 0; j < 8; ++j) {
-            __m256 wdst = _mm256_loadu_ps(&block_wdstp[j * stride]);
-            wdst = _mm256_fmadd_ps(adaptive_weight, denoising_group[i * 8 + j], wdst);
-            _mm256_storeu_ps(&block_wdstp[j * stride], wdst);
+            simde__m256 wdst = simde_mm256_loadu_ps(&block_wdstp[j * stride]);
+            wdst = simde_mm256_fmadd_ps(adaptive_weight, denoising_group[i * 8 + j], wdst);
+            simde_mm256_storeu_ps(&block_wdstp[j * stride], wdst);
 
-            __m256 weight = _mm256_loadu_ps(&block_weightp[j * stride]);
-            weight = _mm256_add_ps(weight, adaptive_weight);
-            _mm256_storeu_ps(&block_weightp[j * stride], weight);
+            simde__m256 weight = simde_mm256_loadu_ps(&block_weightp[j * stride]);
+            weight = simde_mm256_add_ps(weight, adaptive_weight);
+            simde_mm256_storeu_ps(&block_weightp[j * stride], weight);
         }
     }
 }
@@ -706,11 +738,11 @@ static inline void local_accumulation_temporal(
     float * VS_RESTRICT wdstp,
     float * VS_RESTRICT weightp,
     int stride,
-    const __m256 denoising_group[64],
+    const simde__m256 denoising_group[64],
     const std::array<int, 8> &index_x,
     const std::array<int, 8> &index_y,
     const std::array<int, 8> &index_z,
-    __m256 adaptive_weight,
+    simde__m256 adaptive_weight,
     int height
 ) noexcept {
 
@@ -723,13 +755,13 @@ static inline void local_accumulation_temporal(
         float * block_weightp = &weightp[z * height * stride * 2 + y * stride + x];
 
         for (int j = 0; j < 8; ++j) {
-            __m256 wdst = _mm256_loadu_ps(&block_wdstp[j * stride]);
-            wdst = _mm256_fmadd_ps(adaptive_weight, denoising_group[i * 8 + j], wdst);
-            _mm256_storeu_ps(&block_wdstp[j * stride], wdst);
+            simde__m256 wdst = simde_mm256_loadu_ps(&block_wdstp[j * stride]);
+            wdst = simde_mm256_fmadd_ps(adaptive_weight, denoising_group[i * 8 + j], wdst);
+            simde_mm256_storeu_ps(&block_wdstp[j * stride], wdst);
 
-            __m256 weight = _mm256_loadu_ps(&block_weightp[j * stride]);
-            weight = _mm256_add_ps(weight, adaptive_weight);
-            _mm256_storeu_ps(&block_weightp[j * stride], weight);
+            simde__m256 weight = simde_mm256_loadu_ps(&block_weightp[j * stride]);
+            weight = simde_mm256_add_ps(weight, adaptive_weight);
+            simde_mm256_storeu_ps(&block_weightp[j * stride], weight);
         }
     }
 }
@@ -744,10 +776,10 @@ static inline void aggregation(
 
     for (int row_i = 0; row_i < height; ++row_i) {
         for (int col_i = 0; col_i < width; col_i += 8) {
-            __m256 wdst = _mm256_load_ps(&wdstp[col_i]);
-            __m256 weight = _mm256_load_ps(&weightp[col_i]);
-            __m256 dst = _mm256_mul_ps(wdst, _mm256_rcp_ps(weight));
-            _mm256_stream_ps(&dstp[col_i], dst);
+            simde__m256 wdst = simde_mm256_load_ps(&wdstp[col_i]);
+            simde__m256 weight = simde_mm256_load_ps(&weightp[col_i]);
+            simde__m256 dst = simde_mm256_mul_ps(wdst, simde_mm256_rcp_ps(weight));
+            simde_mm256_stream_ps(&dstp[col_i], dst);
         }
 
         dstp += stride;
@@ -790,7 +822,7 @@ static inline void bm3d(
         for (int _x = 0; _x < width - 8 + block_step; _x += block_step) {
             int x = std::min(_x, width - 8); // clamp
 
-            __m256 reference_block[8];
+            simde__m256 reference_block[8];
             if constexpr (final_) {
                 load_block(reference_block, &refps[center][y * stride + x], stride);
             } else {
@@ -848,7 +880,7 @@ static inline void bm3d(
                     continue;
                 }
 
-                __m256 denoising_group[64];
+                simde__m256 denoising_group[64];
                 if constexpr (temporal) {
                     load_3d_group_temporal(
                         denoising_group, &srcps[plane * temporal_width],
@@ -858,9 +890,9 @@ static inline void bm3d(
                         denoising_group, srcps[plane], stride, index_x, index_y);
                 }
 
-                __m256 adaptive_weight;
+                simde__m256 adaptive_weight;
                 if constexpr (final_) { // final estimation
-                    __m256 basic_estimate_group[64];
+                    simde__m256 basic_estimate_group[64];
                     if constexpr (temporal) {
                         load_3d_group_temporal(
                             basic_estimate_group, &refps[plane * temporal_width],
