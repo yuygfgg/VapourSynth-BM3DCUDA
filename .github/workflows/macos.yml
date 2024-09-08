@@ -1,16 +1,16 @@
-name: Build (Linux)
+name: Build (MacOS)
 
 on:
   push:
     paths:
       - 'CMakeLists.txt'
       - 'cpu_source/*'
-      - '.github/workflows/linux.yml'
+      - '.github/workflows/macos.yml'
   workflow_dispatch:
 
 jobs:
   build-linux:
-    runs-on: ubuntu-22.04
+    runs-on: macos-latest
     steps:
     - name: Checkout repo
       uses: actions/checkout@v3
@@ -35,5 +35,5 @@ jobs:
     - name: Upload
       uses: actions/upload-artifact@v3
       with:
-        name: VapourSynth-BM3DCUDA-Linux
+        name: VapourSynth-BM3DCUDA-MacOS
         path: artifact
