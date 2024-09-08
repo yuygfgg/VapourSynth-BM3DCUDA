@@ -11,21 +11,12 @@ set_target_properties(bm3dcpu PROPERTIES
     CXX_STANDARD 17
     CXX_STANDARD_REQUIRED ON)
 
-if ((CMAKE_CXX_COMPILER_ID STREQUAL "GNU") OR (CMAKE_CXX_COMPILER_ID MATCHES "^(Apple)?Clang$"))
-
-    target_compile_options(bm3dcpu PRIVATE "-mavx2;-mfma;-mpopcnt")
-
-elseif (((CMAKE_CXX_COMPILER_ID STREQUAL "Intel") OR (CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")) AND
-        (CMAKE_SYSTEM_NAME STREQUAL "Linux"))
-
-    target_compile_options(bm3dcpu PRIVATE "-march=core-avx2")
-
-elseif ((CMAKE_CXX_COMPILER_ID STREQUAL "MSVC") OR
-        (((CMAKE_CXX_COMPILER_ID STREQUAL "Intel") OR (CMAKE_CXX_COMPILER_ID STREQUAL "IntelLLVM")) AND
-         (CMAKE_SYSTEM_NAME STREQUAL "Windows")))
-
-    target_compile_options(bm3dcpu PRIVATE "/arch:AVX2")
-
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64") # Check for 64-bit x86
+    if ((CMAKE_CXX_COMPILER_ID STREQUAL "GNU") OR (CMAKE_CXX_COMPILER_ID MATCHES "^(Apple)?Clang$"))
+        target_compile_options(bm3dcpu PRIVATE "-mavx2;-mfma;-mpopcnt")
+    elseif (CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
+        target_compile_options(bm3dcpu PRIVATE "/arch:AVX2")
+    endif()
 endif()
 
 install(TARGETS bm3dcpu

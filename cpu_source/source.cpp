@@ -65,8 +65,6 @@
 #include "simde/x86/avx2.h"
 #include "simde/x86/fma.h"
 
-#include "cpuid.h"
-
 #if defined(__x86_64__) || defined(_M_X64) || defined(__i386) || defined(_M_IX86)
 #include <nmmintrin.h>
 
@@ -1301,10 +1299,6 @@ static void VS_CC BM3DCreate(
     const VSMap *in, VSMap *out, void *userData,
     VSCore *core, const VSAPI *vsapi
 ) noexcept {
-    if (!cpu_supports_avx2()) {
-        vsapi->setError(out, "bm3dcpu: requires AVX2-capable cpu");
-        return;
-    }
 
     auto d { std::make_unique<BM3DData>() };
 
