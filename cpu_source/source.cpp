@@ -68,17 +68,6 @@
 #if defined(__x86_64__) || defined(_M_X64) || defined(__i386) || defined(_M_IX86)
 #include <nmmintrin.h>
 
-#elif defined(__ARM_NEON)
-
-uint32_t _mm_popcnt_u32(uint32_t x) {
-    uint8x8_t input = vmov_n_u8(0);
-    input = vreinterpret_u8_u32(vset_lane_u32(x, vreinterpret_u32_u8(input), 0));
-    uint8x8_t result = vcnt_u8(input);
-    uint16x4_t sum = vpaddl_u8(result);
-    sum = vpadd_u16(sum, sum);
-    return vget_lane_u16(sum, 0);
-}
-
 #else
 
 uint32_t _mm_popcnt_u32(uint32_t x) {
