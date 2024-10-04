@@ -28,6 +28,7 @@
 
 #if !defined(SIMDE_COMMON_H)
 #define SIMDE_COMMON_H
+#define SIMDE_ENABLE_OPENMP
 
 #include "hedley.h"
 
